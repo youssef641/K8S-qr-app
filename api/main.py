@@ -1,17 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import qrcode
-import boto3
 import os
 from io import BytesIO
-
-# Loading Environment variable (AWS Access Key and Secret Key)
-from dotenv import load_dotenv
-load_dotenv()
+import validators
+import hashlib
 
 app = FastAPI()
 
-# Allowing CORS for local testing
+# CORS Middleware Configuration
 origins = [
     "http://localhost:3000"
 ]
@@ -23,16 +21,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# AWS S3 Configuration
-s3 = boto3.client(
-    's3',
-    aws_access_key_id= os.getenv("AWS_ACCESS_KEY"),
-    aws_secret_access_key= os.getenv("AWS_SECRET_KEY"))
+# Directory to store QR codes locally
+LOCAL_QR_DIR = "qr_codes"
 
-bucket_name = 'YOUR_BUCKET_NAME' # Add your bucket name here
+# Ensure the directory exists
+if not os.path.exists(LOCAL_QR_DIR):
+    os.makedirs(LOCAL_QR_DIR)
+
+# Serve static files from the qr_codes directory
+app.mount("/static", StaticFiles(directory=LOCAL_QR_DIR), name="static")
 
 @app.post("/generate-qr/")
 async def generate_qr(url: str):
+    # Validate the URL
+    if not validators.url(url):
+        raise HTTPException(status_code=400, detail="Invalid URL provided.")
+
     # Generate QR Code
     qr = qrcode.QRCode(
         version=1,
@@ -42,24 +46,18 @@ async def generate_qr(url: str):
     )
     qr.add_data(url)
     qr.make(fit=True)
-
     img = qr.make_image(fill_color="black", back_color="white")
-    
-    # Save QR Code to BytesIO object
-    img_byte_arr = BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
 
-    # Generate file name for S3
-    file_name = f"qr_codes/{url.split('//')[-1]}.png"
+    # Generate a unique file name using a hash of the URL
+    hashed_url = hashlib.md5(url.encode()).hexdigest()
+    file_name = f"{hashed_url}.png"
+    file_path = os.path.join(LOCAL_QR_DIR, file_name)
 
     try:
-        # Upload to S3
-        s3.put_object(Bucket=bucket_name, Key=file_name, Body=img_byte_arr, ContentType='image/png', ACL='public-read')
+        # Save the QR code image locally
+        img.save(file_path, format='PNG')
         
-        # Generate the S3 URL
-        s3_url = f"https://{bucket_name}.s3.amazonaws.com/{file_name}"
-        return {"qr_code_url": s3_url}
+        # Return the local file path
+        return {"qr_code_path": f"/static/{file_name}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
